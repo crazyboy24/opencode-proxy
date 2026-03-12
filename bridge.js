@@ -184,14 +184,18 @@ function buildParts(messages, tools) {
     if (m.role === "system") continue
     const role = m.role.toUpperCase()
 
-    // Assistant tool_calls
+    // Assistant tool_calls (may also have text content)
     if (m.role === "assistant" && m.tool_calls?.length) {
       parts.push({ type: "text", text: `[${role}]` })
+      // Preserve any text content alongside tool calls
+      if (typeof m.content === "string" && m.content) {
+        parts.push({ type: "text", text: m.content })
+      }
       for (const tc of m.tool_calls) {
         parts.push({
-          type:     "tool-call",
-          toolName: tc.function?.name ?? tc.name,
-          toolArgs: (() => { try { return JSON.parse(tc.function?.arguments ?? "{}") } catch { return {} } })(),
+          type:       "tool-call",
+          toolName:   tc.function?.name ?? tc.name,
+          toolArgs:   (() => { try { return JSON.parse(tc.function?.arguments ?? "{}") } catch { return {} } })(),
           toolCallId: tc.id,
         })
       }
@@ -227,7 +231,9 @@ function buildParts(messages, tools) {
           const url   = c.image_url?.url ?? ""
 
           if (url.startsWith("data:")) {
-            const [meta, data] = url.split(",")
+            const commaIdx = url.indexOf(",")
+            const meta = url.slice(0, commaIdx)
+            const data = url.slice(commaIdx + 1)
             const mediaType    = meta.replace("data:", "").replace(";base64", "")
             parts.push({ type: "image", source: { type: "base64", mediaType, data } })
           } else {
