@@ -16,7 +16,8 @@ const PROVIDER_ID  = process.env.OPENCODE_PROVIDER_ID         || "github-copilot
 const DEFAULT_MODEL= process.env.DEFAULT_MODEL                || "gpt-4o"
 const BRIDGE_KEY   = process.env.OPENCODE_PROXY_API_KEY       || ""
 const LOG_LEVEL    = process.env.LOG_LEVEL                    || "info"
-const TIMEOUT_MS   = parseInt(process.env.TIMEOUT_MS          || "120000", 10)
+const TIMEOUT_MS      = parseInt(process.env.TIMEOUT_MS       || "600000", 10) // 10 min default
+const HEARTBEAT_MS    = parseInt(process.env.HEARTBEAT_MS    || "15000",  10) // SSE comment every 15s to keep connection alive
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 
@@ -161,11 +162,28 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
     const sessionId = session.id
     logger.debug(`[${reqId}] session created: ${sessionId}`)
 
-    // 2. Send prompt
-    const result = await ocPost(`/session/${sessionId}/message`, {
-      model: { providerID, modelID },
-      parts: [{ type: "text", text: flattenMessages(messages) }],
-    })
+    // 2. Send prompt — start heartbeat if streaming to keep connection alive
+    let heartbeat = null
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream")
+      res.setHeader("Cache-Control", "no-cache")
+      res.setHeader("Connection", "keep-alive")
+      res.flushHeaders()
+      // SSE comment lines keep the connection alive while OpenCode processes
+      heartbeat = setInterval(() => res.write(": heartbeat
+
+"), HEARTBEAT_MS)
+    }
+
+    let result
+    try {
+      result = await ocPost(`/session/${sessionId}/message`, {
+        model: { providerID, modelID },
+        parts: [{ type: "text", text: flattenMessages(messages) }],
+      })
+    } finally {
+      if (heartbeat) clearInterval(heartbeat)
+    }
 
     // 3. Extract response text
     const parts        = result.parts ?? []
@@ -185,9 +203,7 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
 
     // 4a. Streaming (SSE) response
     if (stream) {
-      res.setHeader("Content-Type", "text/event-stream")
-      res.setHeader("Cache-Control", "no-cache")
-      res.setHeader("Connection", "keep-alive")
+      // Headers already sent via flushHeaders above
 
       // Role chunk
       res.write(`data: ${JSON.stringify({
@@ -252,6 +268,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   logger.info(`  OpenCode  : ${OPENCODE_URL}`)
   logger.info(`  Provider  : ${PROVIDER_ID}`)
   logger.info(`  Timeout   : ${TIMEOUT_MS}ms`)
+  logger.info(`  Heartbeat : ${HEARTBEAT_MS}ms (SSE keep-alive)`)
   logger.info(`  Auth      : ${BRIDGE_KEY ? "enabled" : "disabled (set OPENCODE_PROXY_API_KEY to enable)"}`)
 
   try {
