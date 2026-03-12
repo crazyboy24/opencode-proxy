@@ -55,11 +55,6 @@ async function ocPost(path, body) {
   return res.json()
 }
 
-async function ocDelete(path) {
-  const res = await fetch(`${OPENCODE_URL}${path}`, { method: "DELETE" })
-  return res.ok
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function flattenMessages(messages) {
@@ -224,7 +219,9 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
     return res.status(502).json({ error: { message: err.message, type: "bridge_error" } })
 
   } finally {
-    if (sessionId) ocDelete(`/session/${sessionId}`).catch(() => {})
+    // Sessions are intentionally not deleted here — deleting while OpenCode
+    // is still writing causes SQLite FK constraint errors. OpenCode manages
+    // session cleanup internally.
   }
 })
 
