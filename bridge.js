@@ -206,7 +206,7 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
       res.setHeader("Connection", "keep-alive")
       res.flushHeaders()
       // SSE comment lines keep the connection alive while OpenCode processes
-      heartbeat = setInterval(() => res.write(": heartbeat
+      heartbeat = setInterval(() => res.write(": heartbeat\n\n"), HEARTBEAT_MS)
 
 "), HEARTBEAT_MS)
     }
