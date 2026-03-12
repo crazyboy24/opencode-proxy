@@ -116,31 +116,38 @@ app.get("/health", async (req, res) => {
 
 app.get("/v1/models", authMiddleware, async (req, res) => {
   try {
-    const data     = await ocGet("/provider")
-    const provider = data.all?.find(p => p.id === PROVIDER_ID)
+    const data      = await ocGet("/provider")
+    const connected = data.connected ?? []
 
-    if (provider?.models) {
-      const models = Object.keys(provider.models).map(id => ({
-        id,
-        object:   "model",
-        owned_by: PROVIDER_ID,
-        created:  0,
-      }))
-      logger.debug(`Returning ${models.length} models from OpenCode provider`)
-      return res.json({ object: "list", data: models })
+    // Return models from all connected providers as "providerID/modelID"
+    // so clients can target a specific provider per-request
+    const models = []
+
+    for (const provider of data.all ?? []) {
+      if (!connected.includes(provider.id)) continue
+      if (!provider.models) continue
+      for (const modelId of Object.keys(provider.models)) {
+        models.push({
+          id:       `${provider.id}/${modelId}`,
+          object:   "model",
+          owned_by: provider.id,
+          created:  0,
+        })
+      }
     }
 
-    throw new Error(`Provider "${PROVIDER_ID}" not found or has no models`)
+    if (models.length === 0) throw new Error("No connected providers found")
+
+    logger.debug(`Returning ${models.length} models from ${connected.length} connected providers`)
+    return res.json({ object: "list", data: models })
 
   } catch (err) {
     logger.error("Failed to fetch models from OpenCode, using fallback:", err.message)
 
     const fallback = [
-      "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
-      "o3", "o4-mini",
-      "claude-sonnet-4-5", "claude-3.5-sonnet",
-      "gemini-2.0-flash-001",
-    ].map(id => ({ id, object: "model", owned_by: PROVIDER_ID, created: 0 }))
+      "github-copilot/gpt-4o", "github-copilot/gpt-4.1",
+      "github-copilot/claude-sonnet-4-5", "github-copilot/gpt-5-mini",
+    ].map(id => ({ id, object: "model", owned_by: id.split("/")[0], created: 0 }))
 
     res.json({ object: "list", data: fallback })
   }
@@ -158,8 +165,18 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
     })
   }
 
-  const modelID = model || DEFAULT_MODEL
-  logger.info(`[${reqId}] → model=${modelID} messages=${messages.length}`)
+  // Model ID can be bare ("gpt-4o") or provider-prefixed ("anthropic/claude-sonnet-4")
+  // Provider-prefixed format overrides OPENCODE_PROVIDER_ID for this request
+  let providerID = PROVIDER_ID
+  let modelID    = model || DEFAULT_MODEL
+
+  if (modelID.includes("/")) {
+    const [p, ...m] = modelID.split("/")
+    providerID = p
+    modelID    = m.join("/")
+  }
+
+  logger.info(`[${reqId}] → provider=${providerID} model=${modelID} messages=${messages.length}`)
 
   let sessionId = null
   const startMs = Date.now()
@@ -172,7 +189,7 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
 
     // 2. Send prompt
     const result = await ocPost(`/session/${sessionId}/message`, {
-      model: { providerID: PROVIDER_ID, modelID },
+      model: { providerID, modelID },
       parts: [{ type: "text", text: flattenMessages(messages) }],
     })
 
