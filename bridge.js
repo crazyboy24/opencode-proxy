@@ -1,8 +1,7 @@
 /**
  * opencode-proxy
  * Translates OpenAI-compatible API requests → OpenCode REST API → response
- * so any OpenAI-compatible client (OpenClaw, etc.) can use models
- * available through an OpenCode server instance (e.g. GitHub Copilot).
+ * Supports both streaming (SSE) and non-streaming responses.
  *
  * https://github.com/crazyboy24/opencode-proxy
  */
@@ -11,13 +10,13 @@ import express from "express"
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT         = parseInt(process.env.PORT         || "5000", 10)
-const OPENCODE_URL = (process.env.OPENCODE_URL         || "http://localhost:4096").replace(/\/$/, "")
-const PROVIDER_ID  = process.env.OPENCODE_PROVIDER_ID  || "github-copilot"
-const DEFAULT_MODEL= process.env.DEFAULT_MODEL         || "gpt-4o"
-const BRIDGE_KEY   = process.env.OPENCODE_PROXY_API_KEY        || ""
-const LOG_LEVEL    = process.env.LOG_LEVEL             || "info"
-const TIMEOUT_MS   = parseInt(process.env.TIMEOUT_MS       || "120000", 10)
+const PORT         = parseInt(process.env.PORT                || "5000",   10)
+const OPENCODE_URL = (process.env.OPENCODE_URL                || "http://localhost:4096").replace(/\/$/, "")
+const PROVIDER_ID  = process.env.OPENCODE_PROVIDER_ID         || "github-copilot"
+const DEFAULT_MODEL= process.env.DEFAULT_MODEL                || "gpt-4o"
+const BRIDGE_KEY   = process.env.OPENCODE_PROXY_API_KEY       || ""
+const LOG_LEVEL    = process.env.LOG_LEVEL                    || "info"
+const TIMEOUT_MS   = parseInt(process.env.TIMEOUT_MS          || "120000", 10)
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 
@@ -53,12 +52,9 @@ async function ocPost(path, body) {
   }).finally(clear)
   const text = await res.text()
   if (!res.ok) throw new Error(`OpenCode ${path} → ${res.status}: ${text.slice(0, 200)}`)
-  if (!text) throw new Error(`OpenCode ${path} → empty response`)
-  try {
-    return JSON.parse(text)
-  } catch {
-    throw new Error(`OpenCode ${path} → invalid JSON: ${text.slice(0, 200)}`)
-  }
+  if (!text)   throw new Error(`OpenCode ${path} → empty response`)
+  try { return JSON.parse(text) }
+  catch { throw new Error(`OpenCode ${path} → invalid JSON: ${text.slice(0, 200)}`) }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -97,19 +93,9 @@ app.use(express.json({ limit: "4mb" }))
 app.get("/health", async (req, res) => {
   try {
     const data = await ocGet("/global/health")
-    res.json({
-      status:         "ok",
-      bridge_version: "1.0.0",
-      opencode:       { connected: true, ...data },
-      provider:       PROVIDER_ID,
-    })
+    res.json({ status: "ok", bridge_version: "1.0.0", opencode: { connected: true, ...data }, provider: PROVIDER_ID })
   } catch (err) {
-    res.json({
-      status:         "ok",
-      bridge_version: "1.0.0",
-      opencode:       { connected: false, error: err.message },
-      provider:       PROVIDER_ID,
-    })
+    res.json({ status: "ok", bridge_version: "1.0.0", opencode: { connected: false, error: err.message }, provider: PROVIDER_ID })
   }
 })
 
@@ -119,37 +105,26 @@ app.get("/v1/models", authMiddleware, async (req, res) => {
   try {
     const data      = await ocGet("/provider")
     const connected = data.connected ?? []
-
-    // Return models from all connected providers as "providerID/modelID"
-    // so clients can target a specific provider per-request
-    const models = []
+    const models    = []
 
     for (const provider of data.all ?? []) {
       if (!connected.includes(provider.id)) continue
       if (!provider.models) continue
       for (const modelId of Object.keys(provider.models)) {
-        models.push({
-          id:       `${provider.id}/${modelId}`,
-          object:   "model",
-          owned_by: provider.id,
-          created:  0,
-        })
+        models.push({ id: `${provider.id}/${modelId}`, object: "model", owned_by: provider.id, created: 0 })
       }
     }
 
     if (models.length === 0) throw new Error("No connected providers found")
-
     logger.debug(`Returning ${models.length} models from ${connected.length} connected providers`)
     return res.json({ object: "list", data: models })
 
   } catch (err) {
     logger.error("Failed to fetch models from OpenCode, using fallback:", err.message)
-
     const fallback = [
       "github-copilot/gpt-4o", "github-copilot/gpt-4.1",
       "github-copilot/claude-sonnet-4-5", "github-copilot/gpt-5-mini",
     ].map(id => ({ id, object: "model", owned_by: id.split("/")[0], created: 0 }))
-
     res.json({ object: "list", data: fallback })
   }
 })
@@ -158,7 +133,7 @@ app.get("/v1/models", authMiddleware, async (req, res) => {
 
 app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
   const reqId = `req_${Date.now()}`
-  const { messages, model } = req.body
+  const { messages, model, stream } = req.body
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({
@@ -166,8 +141,7 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
     })
   }
 
-  // Model ID can be bare ("gpt-4o") or provider-prefixed ("anthropic/claude-sonnet-4")
-  // Provider-prefixed format overrides OPENCODE_PROVIDER_ID for this request
+  // Model can be bare "gpt-4o" or provider-prefixed "github-copilot/gpt-4o"
   let providerID = PROVIDER_ID
   let modelID    = model || DEFAULT_MODEL
 
@@ -177,15 +151,14 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
     modelID    = m.join("/")
   }
 
-  logger.info(`[${reqId}] → provider=${providerID} model=${modelID} messages=${messages.length}`)
+  logger.info(`[${reqId}] → provider=${providerID} model=${modelID} messages=${messages.length} stream=${!!stream}`)
 
-  let sessionId = null
   const startMs = Date.now()
 
   try {
     // 1. Create session
-    const session = await ocPost("/session", { title: `bridge-${reqId}` })
-    sessionId = session.id
+    const session   = await ocPost("/session", { title: `bridge-${reqId}` })
+    const sessionId = session.id
     logger.debug(`[${reqId}] session created: ${sessionId}`)
 
     // 2. Send prompt
@@ -194,13 +167,11 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
       parts: [{ type: "text", text: flattenMessages(messages) }],
     })
 
-    // 3. Extract response
+    // 3. Extract response text
     const parts        = result.parts ?? []
-    logger.debug(`[${reqId}] result keys: ${Object.keys(result).join(", ")}`)
     logger.debug(`[${reqId}] parts: ${JSON.stringify(parts.map(p => ({ type: p.type, len: p.text?.length ?? 0 })))}`)
     const textPart     = parts.find(p => p.type === "text")
     const responseText = textPart?.text ?? ""
-    logger.debug(`[${reqId}] responseText length: ${responseText.length}`)
 
     const usage = {
       prompt_tokens:     result.info?.tokens?.input  ?? 0,
@@ -208,29 +179,63 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
       total_tokens:      result.info?.tokens?.total  ?? 0,
     }
 
-    logger.info(`[${reqId}] ✓ ${Date.now() - startMs}ms tokens=${usage.total_tokens}`)
+    logger.info(`[${reqId}] ✓ ${Date.now() - startMs}ms tokens=${usage.total_tokens} chars=${responseText.length}`)
 
+    const cmplId  = `chatcmpl-${sessionId}`
+    const created = Math.floor(Date.now() / 1000)
+
+    // 4a. Streaming (SSE) response
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream")
+      res.setHeader("Cache-Control", "no-cache")
+      res.setHeader("Connection", "keep-alive")
+
+      // Role chunk
+      res.write(`data: ${JSON.stringify({
+        id: cmplId, object: "chat.completion.chunk", created, model: modelID,
+        choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+      })}\n\n`)
+
+      // Content chunk
+      res.write(`data: ${JSON.stringify({
+        id: cmplId, object: "chat.completion.chunk", created, model: modelID,
+        choices: [{ index: 0, delta: { content: responseText }, finish_reason: null }],
+      })}\n\n`)
+
+      // Finish chunk
+      res.write(`data: ${JSON.stringify({
+        id: cmplId, object: "chat.completion.chunk", created, model: modelID,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage,
+      })}\n\n`)
+
+      res.write("data: [DONE]\n\n")
+      return res.end()
+    }
+
+    // 4b. Non-streaming response
     return res.json({
-      id:      `chatcmpl-${sessionId}`,
-      object:  "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model:   modelID,
-      choices: [{
-        index:         0,
-        message:       { role: "assistant", content: responseText },
-        finish_reason: "stop",
-      }],
+      id: cmplId, object: "chat.completion", created, model: modelID,
+      choices: [{ index: 0, message: { role: "assistant", content: responseText }, finish_reason: "stop" }],
       usage,
     })
 
   } catch (err) {
     logger.error(`[${reqId}] ✗ ${Date.now() - startMs}ms`, err.message)
-    return res.status(502).json({ error: { message: err.message, type: "bridge_error" } })
 
-  } finally {
-    // Sessions are intentionally not deleted here — deleting while OpenCode
-    // is still writing causes SQLite FK constraint errors. OpenCode manages
-    // session cleanup internally.
+    if (stream) {
+      if (!res.headersSent) {
+        res.setHeader("Content-Type", "text/event-stream")
+        res.setHeader("Cache-Control", "no-cache")
+      }
+      res.write(`data: ${JSON.stringify({ error: { message: err.message, type: "bridge_error" } })}\n\n`)
+      res.write("data: [DONE]\n\n")
+      return res.end()
+    }
+
+    if (!res.headersSent) {
+      return res.status(502).json({ error: { message: err.message, type: "bridge_error" } })
+    }
   }
 })
 
@@ -247,8 +252,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   logger.info(`  Listening : http://0.0.0.0:${PORT}`)
   logger.info(`  OpenCode  : ${OPENCODE_URL}`)
   logger.info(`  Provider  : ${PROVIDER_ID}`)
-  logger.info(`  Auth      : ${BRIDGE_KEY ? "enabled" : "disabled (set OPENCODE_PROXY_API_KEY to enable)"}`)
   logger.info(`  Timeout   : ${TIMEOUT_MS}ms`)
+  logger.info(`  Auth      : ${BRIDGE_KEY ? "enabled" : "disabled (set OPENCODE_PROXY_API_KEY to enable)"}`)
 
   try {
     const h = await ocGet("/global/health")
