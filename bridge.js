@@ -1,5 +1,5 @@
 /**
- * opencode-proxy
+ * opencode-bridge
  * Translates OpenAI-compatible API requests → OpenCode REST API → response
  * Supports both streaming (SSE) and non-streaming responses.
  *
@@ -14,7 +14,7 @@ const PORT         = parseInt(process.env.PORT                || "5000",   10)
 const OPENCODE_URL = (process.env.OPENCODE_URL                || "http://localhost:4096").replace(/\/$/, "")
 const PROVIDER_ID  = process.env.OPENCODE_PROVIDER_ID         || "github-copilot"
 const DEFAULT_MODEL= process.env.DEFAULT_MODEL                || "gpt-4o"
-const BRIDGE_KEY   = process.env.OPENCODE_PROXY_API_KEY       || ""
+const BRIDGE_KEY   = process.env.OPENCODE_BRIDGE_API_KEY       || ""
 const LOG_LEVEL    = process.env.LOG_LEVEL                    || "info"
 const TIMEOUT_MS      = parseInt(process.env.TIMEOUT_MS       || "600000", 10) // 10 min default
 const HEARTBEAT_MS    = parseInt(process.env.HEARTBEAT_MS    || "15000",  10) // SSE comment every 15s to keep connection alive
@@ -305,7 +305,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   logger.info(`  Provider  : ${PROVIDER_ID}`)
   logger.info(`  Timeout   : ${TIMEOUT_MS}ms`)
   logger.info(`  Heartbeat : ${HEARTBEAT_MS}ms (SSE keep-alive)`)
-  logger.info(`  Auth      : ${BRIDGE_KEY ? "enabled" : "disabled (set OPENCODE_PROXY_API_KEY to enable)"}`)
+  logger.info(`  Auth      : ${BRIDGE_KEY ? "enabled" : "disabled (set OPENCODE_BRIDGE_API_KEY to enable)"}`)
 
   try {
     const h = await ocGet("/global/health")
