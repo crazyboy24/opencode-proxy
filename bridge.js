@@ -60,18 +60,50 @@ async function ocPost(path, body) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function flattenMessages(messages) {
-  return messages
-    .map(m => {
-      const role    = m.role.toUpperCase()
-      const content = typeof m.content === "string"
-        ? m.content
-        : Array.isArray(m.content)
-          ? m.content.map(c => c.text ?? "").join("\n")
-          : ""
-      return `[${role}]\n${content}`
-    })
-    .join("\n\n")
+/**
+ * Converts OpenAI messages into OpenCode parts array.
+ * Handles text, image_url (base64 data URI or remote URL).
+ * Returns { parts, hasImg } where parts is the OpenCode-format array.
+ */
+function buildParts(messages) {
+  const parts  = []
+  let   hasImg = false
+
+  for (const m of messages) {
+    const role = m.role.toUpperCase()
+
+    if (typeof m.content === "string") {
+      parts.push({ type: "text", text: `[${role}]\n${m.content}` })
+      continue
+    }
+
+    if (Array.isArray(m.content)) {
+      parts.push({ type: "text", text: `[${role}]` })
+
+      for (const c of m.content) {
+        if (c.type === "text") {
+          parts.push({ type: "text", text: c.text ?? "" })
+
+        } else if (c.type === "image_url") {
+          hasImg      = true
+          const url   = c.image_url?.url ?? ""
+
+          if (url.startsWith("data:")) {
+            // Base64 data URI: "data:image/png;base64,iVBOR..."
+            const [meta, data] = url.split(",")
+            const mediaType    = meta.replace("data:", "").replace(";base64", "")
+            parts.push({ type: "image", source: { type: "base64", mediaType, data } })
+          } else {
+            // Remote URL
+            parts.push({ type: "image", source: { type: "url", url } })
+          }
+        }
+        // audio / file parts silently skipped — not supported by OpenCode
+      }
+    }
+  }
+
+  return { parts, hasImg }
 }
 
 function authMiddleware(req, res, next) {
@@ -162,7 +194,11 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
     const sessionId = session.id
     logger.debug(`[${reqId}] session created: ${sessionId}`)
 
-    // 2. Send prompt — start heartbeat if streaming to keep connection alive
+    // 2. Build parts (text + optional images)
+    const { parts: msgParts, hasImg } = buildParts(messages)
+    if (hasImg) logger.info(`[${reqId}] multimodal request — images detected`)
+
+    // 3. Send prompt — start heartbeat if streaming to keep connection alive
     let heartbeat = null
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream")
@@ -179,7 +215,7 @@ app.post("/v1/chat/completions", authMiddleware, async (req, res) => {
     try {
       result = await ocPost(`/session/${sessionId}/message`, {
         model: { providerID, modelID },
-        parts: [{ type: "text", text: flattenMessages(messages) }],
+        parts: msgParts,
       })
     } finally {
       if (heartbeat) clearInterval(heartbeat)
