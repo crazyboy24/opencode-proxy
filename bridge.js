@@ -51,8 +51,14 @@ async function ocPost(path, body) {
     body:    JSON.stringify(body),
     signal,
   }).finally(clear)
-  if (!res.ok) throw new Error(`OpenCode ${path} → ${res.status}`)
-  return res.json()
+  const text = await res.text()
+  if (!res.ok) throw new Error(`OpenCode ${path} → ${res.status}: ${text.slice(0, 200)}`)
+  if (!text) throw new Error(`OpenCode ${path} → empty response`)
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`OpenCode ${path} → invalid JSON: ${text.slice(0, 200)}`)
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
