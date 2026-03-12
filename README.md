@@ -1,11 +1,11 @@
-# opencode-proxy
+# opencode-bridge
 
 > An OpenAI-compatible API bridge for [OpenCode](https://opencode.ai) — expose any of OpenCode's 75+ supported providers (GitHub Copilot, Anthropic, OpenAI, Ollama, OpenRouter, Azure and more) as a single OpenAI-compatible endpoint.
 
 ```
 Your AI Client  →  POST /v1/chat/completions
                         ↓
-               opencode-proxy  (this repo)
+               opencode-bridge  (this repo)
                         ↓  @opencode-ai/sdk
                OpenCode Server  (opencode serve)
                         ↓
@@ -55,8 +55,8 @@ This bridge sits between them. Whatever provider you've connected in OpenCode be
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/yourusername/opencode-proxy
-cd opencode-proxy
+git clone https://github.com/yourusername/opencode-bridge
+cd opencode-bridge
 cp .env.example .env
 # Edit .env — at minimum set OPENCODE_URL and OPENCODE_PROVIDER_ID
 ```
@@ -132,11 +132,11 @@ For the full list of 75+ providers, see the [OpenCode provider docs](https://ope
 ### Build and run
 
 ```bash
-docker build -t opencode-proxy .
+docker build -t opencode-bridge .
 docker run -p 5000:5000 \
   -e OPENCODE_URL=http://host.docker.internal:4096 \
   -e OPENCODE_PROVIDER_ID=github-copilot \
-  opencode-proxy
+  opencode-bridge
 ```
 
 ### Docker Compose (local dev)
@@ -157,7 +157,7 @@ Full walkthrough for deploying alongside an existing OpenCode server on Coolify.
 ```
 Coolify VPS
 ├── opencode-server   (opencode serve, port 4096, internal only)
-├── opencode-proxy   (this repo, port 5000, internal only)
+├── opencode-bridge   (this repo, port 5000, internal only)
 └── your-ai-client    (OpenClaw / any client — points to bridge)
 ```
 
